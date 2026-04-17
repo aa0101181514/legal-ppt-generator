@@ -49,15 +49,27 @@
 
 依 `knowledge/PPT_OUTLINE_TEMPLATE.md` 的「先程序後實體」結構規劃：
 
-- 封面
-- 目次
-- 壹、犯後態度 / 前置事由
-- 貳、程序爭點
-- 參、肆、伍…實體爭點（依重要性）
-- 結論與聲明
-- 附錄（本簡報引用判決清單）
+- **封面**（layout: cover）
+- **答辯架構總覽**（layout: agenda）— 列出壹~捌章節
+- **壹～捌章節**（每章節至少 1 張 content 頁 + 對應的 exhibit 頁）
+- **結論與聲明**（layout: conclusion）
+- **附錄**（layout: appendix）— 自動產出本簡報引用判決清單
 
-**章節數以 8-12 張投影片為目標**，避免過多。
+**論述頁與卷證截圖頁搭配**：
+
+參考 v2 結構，**每個論述頁後面緊接著 1~3 張卷證截圖頁**。例如：
+
+```
+論述頁：貳、程序爭點
+  ↓
+卷證原件 ① 113.8.16 — 國稅局復函
+卷證原件 ② 113.12.5 — 檢方函稿
+卷證原件 ③ 113.12.12 — 證據 94 國稅局第 1 版推估
+```
+
+這樣法官一邊看論點、一邊看原件，說服力最強。
+
+**章節數目標**：8~15 個論述頁 + 對應 exhibit 頁，總計 20~40 張。
 
 ### 步驟 5 — 為每個爭點找支持判決並驗證
 
@@ -84,6 +96,38 @@
 ```bash
 python scripts/generate_pptx.py /tmp/{案號}_outline.json {輸出路徑}
 ```
+
+**關於卷證截圖頁（layout: exhibit）**：
+
+JSON 中 exhibit 頁的關鍵欄位：
+
+```json
+{
+  "layout": "exhibit",
+  "title": "卷證原件 ① 113.8.16 — 國稅局復函",
+  "subtitle": "113偵27269卷5 p.253 — 財政部高雄國稅局 113.8.19 復函",
+  "pdf_path": "113偵27269卷5.pdf",
+  "page_num": 253
+}
+```
+
+`generate_pptx.py` 會自動：
+
+1. 呼叫 `scripts/pdf_render.py` 把指定 PDF 的指定頁渲染成 PNG
+2. 把 PNG 貼在 slide 右側（6.35" 起，最大 6.45" 寬、5.8" 高）
+3. 左側留給標題 + `subtitle` 卷頁標註
+
+**頁碼偏移注意**：
+
+`page_num` 是 **PDF 的實際頁碼**（1-based），不是卷頁戳。若卷宗有卷頁戳 ≠ PDF 頁（偏移不是 0），Claude 必須：
+
+1. 向使用者詢問該卷偏移（例：「該卷 PDF 第幾頁 = 卷頁戳第幾頁？」）
+2. 或先 Read 該 PDF 某頁確認內容後再決定
+3. 不可憑空推算
+
+`pdf_path` 可以是：
+- 絕對路徑（`~/Desktop/...`）
+- 相對路徑 — 相對於 JSON 中 `base_dir` 欄位設定的基準目錄
 
 ### 步驟 7 — 交付與後續
 
@@ -211,13 +255,16 @@ dr-lawbot 收錄民國 100 年起判決。89 年以前的舊判例（例 79 判 
 ## 八、腳本（`scripts/`）
 
 - `verify_citation.py` — dr-lawbot API 驗證工具
+- `pdf_render.py` — PDF 單頁渲染為 PNG（給卷證截圖用）
 - `generate_pptx.py` — 主產檔腳本
-- `ppt_theme.py` — 樣式常數（字型、顏色、版面）
+- `ppt_theme.py` — 樣式常數（v2 實測配色、字型、版面）
 
 ## 九、環境依賴
 
 首次執行時若缺套件，請自動安裝：
 
 ```bash
-pip install python-pptx certifi lxml
+pip install -r requirements.txt
+# 或
+pip install python-pptx certifi lxml pymupdf
 ```
