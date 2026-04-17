@@ -15,6 +15,7 @@ from pathlib import Path
 from pptx import Presentation
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt, Emu
+from pptx.dml.color import RGBColor
 
 import ppt_theme as T
 
@@ -248,15 +249,23 @@ def render_content(prs, slide_data):
         current_top += body_height + T.BLOCK_GAP
 
 
-def render_exhibit(prs, slide_data, base_dir=None):
-    """卷證原件頁：左側卷頁副標 + 右側整頁 PNG。
+def render_exhibit(prs, slide_data, base_dir=None, warnings=None):
+    """卷證原件頁：可放 1~3 張 PDF 頁截圖。
 
-    slide_data 欄位：
-      - title: "卷證原件 ① 113.8.16 — 國稅局復函"
-      - subtitle: "113偵27269卷5 p.253 — 財政部高雄國稅局113.8.19復函"
-      - pdf_path: "~/Desktop/ABC牙醫聯盟/3_刑事/閱卷資料/113偵27269卷5.pdf"
-      - page_num: 253
-      - note: （選填）下方說明
+    slide_data 欄位（兩種輸入方式擇一）：
+      (A) 單圖簡寫：
+        - pdf_path: "113偵27269卷5.pdf"
+        - page_num: 253
+        - subtitle: "113偵27269卷5 p.253 — …"
+      (B) 多圖陣列（1~3 張）：
+        - images: [
+            {"pdf_path": "..", "page_num": 429, "caption": "p.429"},
+            {"pdf_path": "..", "page_num": 430, "caption": "p.430"}
+          ]
+        - subtitle: 共用副標（選填）
+    其他：
+      - title: 頁面標題
+      - note: 左側說明文字（單圖模式有空間；多圖會擠）
     """
     slide = _blank(prs)
     _fill_bg(slide, T.COLOR_BG)
@@ -267,7 +276,7 @@ def render_exhibit(prs, slide_data, base_dir=None):
         size=T.FONT_SIZE_EXHIBIT_TITLE,
     )
 
-    # 副標（卷頁標記）
+    # 副標
     if slide_data.get("subtitle"):
         _, tf = _textbox(
             slide, T.CONTENT_LEFT, Inches(1.20),
@@ -278,46 +287,56 @@ def render_exhibit(prs, slide_data, base_dir=None):
             size=T.FONT_SIZE_SUBLABEL, color=T.COLOR_PRIMARY, bold=True,
         )
 
-    # 渲染 PDF 頁成 PNG 並插入右側
-    pdf_path = slide_data.get("pdf_path")
-    page_num = slide_data.get("page_num")
-    png_path = slide_data.get("image_path")  # 可直接指定已有的 PNG
+    # 整理 images 清單
+    images = slide_data.get("images")
+    if not images:
+        # 向後相容：從頂層 pdf_path/page_num 建單圖
+        if slide_data.get("pdf_path") and slide_data.get("page_num"):
+            images = [{
+                "pdf_path": slide_data["pdf_path"],
+                "page_num": slide_data["page_num"],
+            }]
+        elif slide_data.get("image_path"):
+            images = [{"image_path": slide_data["image_path"]}]
+        else:
+            images = []
 
-    if not png_path and pdf_path and page_num and pdf_render:
-        try:
-            resolved_pdf = Path(pdf_path).expanduser()
-            if not resolved_pdf.is_absolute() and base_dir:
-                resolved_pdf = Path(base_dir) / pdf_path
-            png_path = pdf_render.render_page(resolved_pdf, page_num)
-        except Exception as e:
-            # 失敗仍保留 slide，標示警告
-            png_path = None
+    # 最多 3 張
+    images = images[:3]
+
+    # 渲染每張圖成 PNG
+    rendered = []
+    for img_spec in images:
+        png = _resolve_image(img_spec, base_dir)
+        if png:
+            rendered.append((img_spec, png))
+        else:
+            if warnings is not None:
+                warnings.append(
+                    f"[{slide_data.get('title', '?')}] 圖片渲染失敗："
+                    f"{img_spec.get('pdf_path') or img_spec.get('image_path')}"
+                    f" p.{img_spec.get('page_num')}"
+                )
             _, tf_err = _textbox(
-                slide, T.CONTENT_LEFT, Inches(2.0),
-                T.CONTENT_WIDTH, Inches(0.6),
+                slide, Inches(6.35), Inches(3.0),
+                Inches(6.0), Inches(0.6),
             )
             _add_run(
                 tf_err.paragraphs[0],
-                f"⚠ PDF 渲染失敗：{e}",
-                size=T.FONT_SIZE_BODY, color=T.COLOR_WARNING,
+                f"⚠ 圖片渲染失敗：{img_spec.get('pdf_path')} p.{img_spec.get('page_num')}",
+                size=T.FONT_SIZE_BODY_SMALL, color=T.COLOR_WARNING,
             )
 
-    if png_path and Path(png_path).exists():
-        # 右側圖片：起始 x=6.35"，最大寬 6.45"，最大高 5.8"
-        img = slide.shapes.add_picture(
-            str(png_path),
-            left=Inches(6.35), top=Inches(1.30),
-            width=Inches(6.45),
-        )
-        # 若高度超出 5.8"，縮小
-        max_h = Inches(5.8)
-        if img.height > max_h:
-            ratio = max_h / img.height
-            img.height = int(img.height * ratio)
-            img.width = int(img.width * ratio)
+    # 依張數決定佈局
+    if len(rendered) == 1:
+        _place_single_image(slide, rendered[0])
+    elif len(rendered) == 2:
+        _place_two_images(slide, rendered)
+    elif len(rendered) >= 3:
+        _place_three_images(slide, rendered[:3])
 
-    # 額外說明
-    if slide_data.get("note"):
+    # 左側說明文字（單圖模式空間足）
+    if slide_data.get("note") and len(rendered) <= 1:
         _, tf_note = _textbox(
             slide, T.CONTENT_LEFT, Inches(1.80),
             Inches(5.5), Inches(5.0),
@@ -326,6 +345,222 @@ def render_exhibit(prs, slide_data, base_dir=None):
             tf_note.paragraphs[0], slide_data["note"],
             size=T.FONT_SIZE_BODY, color=T.COLOR_BODY,
         )
+
+
+def _resolve_image(img_spec, base_dir):
+    """把 img_spec 解析成實際 PNG 路徑。回傳 Path 或 None。"""
+    # 直接給 PNG
+    if img_spec.get("image_path"):
+        p = Path(img_spec["image_path"]).expanduser()
+        return p if p.exists() else None
+
+    # 給 PDF + 頁碼 → 呼叫 pdf_render
+    pdf = img_spec.get("pdf_path")
+    page = img_spec.get("page_num")
+    if not (pdf and page and pdf_render):
+        return None
+
+    try:
+        resolved = Path(pdf).expanduser()
+        if not resolved.is_absolute() and base_dir:
+            resolved = Path(base_dir).expanduser() / pdf
+        return pdf_render.render_page(resolved, int(page))
+    except Exception:
+        return None
+
+
+def _place_single_image(slide, item):
+    """單圖：右側大圖。"""
+    img_spec, png = item
+    img = slide.shapes.add_picture(
+        str(png),
+        left=Inches(6.35), top=Inches(1.30),
+        width=Inches(6.45),
+    )
+    max_h = Inches(5.8)
+    if img.height > max_h:
+        ratio = max_h / img.height
+        img.height = int(img.height * ratio)
+        img.width = int(img.width * ratio)
+
+    # 圖下方 caption（若有）
+    if img_spec.get("caption"):
+        _add_image_caption(slide, img_spec["caption"], img)
+
+
+def _place_two_images(slide, items):
+    """兩圖並排：各佔右 / 左半邊。"""
+    # 右半邊分成兩欄
+    img_top = Inches(1.35)
+    img_area_width = Inches(12.0)
+    col_gap = Inches(0.2)
+    col_width = (img_area_width - col_gap) / 2   # 5.9"
+    left_x = Inches(0.70)
+    right_x = left_x + col_width + col_gap
+
+    positions = [left_x, right_x]
+    for i, (img_spec, png) in enumerate(items):
+        img = slide.shapes.add_picture(
+            str(png),
+            left=positions[i], top=img_top,
+            width=col_width,
+        )
+        max_h = Inches(5.5)
+        if img.height > max_h:
+            ratio = max_h / img.height
+            img.height = int(img.height * ratio)
+            img.width = int(img.width * ratio)
+
+        if img_spec.get("caption"):
+            _add_image_caption(slide, img_spec["caption"], img)
+
+
+def _place_three_images(slide, items):
+    """三圖並排：上一 + 下兩，或三欄。"""
+    img_top = Inches(1.35)
+    img_area_width = Inches(12.0)
+    col_gap = Inches(0.2)
+    col_width = (img_area_width - col_gap * 2) / 3   # ~3.87"
+    left_x = Inches(0.70)
+
+    for i, (img_spec, png) in enumerate(items):
+        x = left_x + (col_width + col_gap) * i
+        img = slide.shapes.add_picture(
+            str(png),
+            left=x, top=img_top,
+            width=col_width,
+        )
+        max_h = Inches(5.5)
+        if img.height > max_h:
+            ratio = max_h / img.height
+            img.height = int(img.height * ratio)
+            img.width = int(img.width * ratio)
+
+        if img_spec.get("caption"):
+            _add_image_caption(slide, img_spec["caption"], img)
+
+
+def _add_image_caption(slide, caption, img):
+    """在圖片底下加 caption。"""
+    cap_top = img.top + img.height + Inches(0.05)
+    cap_left = img.left
+    cap_width = img.width
+    _, tf = _textbox(
+        slide, cap_left, cap_top, cap_width, Inches(0.35),
+        align=PP_ALIGN.CENTER,
+    )
+    _add_run(
+        tf.paragraphs[0], caption,
+        size=T.FONT_SIZE_BODY_SMALL, color=T.COLOR_MUTED,
+    )
+
+
+def render_timeline(prs, slide_data):
+    """時間軸表格頁：日期 / 事件 / 證據 三欄。
+
+    slide_data 欄位：
+      - title: 標題
+      - subtitle: 副標（選填）
+      - columns: ["日期", "事件", "證據"]  預設值
+      - rows: [["113.8.16", "國稅局復函", "原件 ①"], ...]
+    """
+    slide = _blank(prs)
+    _fill_bg(slide, T.COLOR_BG)
+    _add_left_strip(slide)
+    _add_title_with_sep(slide, slide_data.get("title", ""))
+
+    if slide_data.get("subtitle"):
+        _, tf = _textbox(
+            slide, T.CONTENT_LEFT, Inches(1.15),
+            T.CONTENT_WIDTH, Inches(0.4),
+        )
+        _add_run(
+            tf.paragraphs[0], slide_data["subtitle"],
+            size=T.FONT_SIZE_SUBLABEL, color=T.COLOR_PRIMARY_LIGHT if hasattr(T, 'COLOR_PRIMARY_LIGHT') else T.COLOR_PRIMARY,
+            bold=True,
+        )
+        table_top = Inches(1.55)
+    else:
+        table_top = Inches(1.30)
+
+    columns = slide_data.get("columns") or ["日期", "事件", "證據編號"]
+    rows = slide_data.get("rows") or []
+
+    _render_table(slide, columns, rows,
+                  left=T.CONTENT_LEFT, top=table_top,
+                  width=T.CONTENT_WIDTH)
+
+
+def render_overview(prs, slide_data):
+    """章節總覽表格頁。
+
+    slide_data 欄位：
+      - title: 標題
+      - columns: ["項目", "內容"] 預設
+      - rows: [["時間點", "113.12.5"], ["事件", "檢方發函"], ...]
+    """
+    slide = _blank(prs)
+    _fill_bg(slide, T.COLOR_BG)
+    _add_left_strip(slide)
+    _add_title_with_sep(slide, slide_data.get("title", ""))
+
+    columns = slide_data.get("columns") or ["項目", "內容"]
+    rows = slide_data.get("rows") or []
+
+    _render_table(slide, columns, rows,
+                  left=T.CONTENT_LEFT, top=Inches(1.30),
+                  width=T.CONTENT_WIDTH)
+
+
+def _render_table(slide, columns, rows, *, left, top, width):
+    """渲染一個 python-pptx TABLE shape。
+
+    第一列為標頭（深藍底白字），其餘列為內容（白底深灰字，奇偶不同色）。
+    """
+    n_rows = len(rows) + 1
+    n_cols = len(columns)
+    if n_rows == 1 or n_cols == 0:
+        return
+
+    # 高度：標頭 0.5"，每行 0.45"
+    header_h = Inches(0.5)
+    row_h = Inches(0.45)
+    total_h = header_h + row_h * len(rows)
+
+    # 加表格
+    shape = slide.shapes.add_table(n_rows, n_cols, left, top, width, total_h)
+    table = shape.table
+
+    # 設定標頭
+    for c, col_name in enumerate(columns):
+        cell = table.cell(0, c)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = T.COLOR_PRIMARY
+        tf = cell.text_frame
+        tf.clear()
+        tf.margin_left = Inches(0.1)
+        tf.margin_right = Inches(0.1)
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        _add_run(p, col_name,
+                 size=T.FONT_SIZE_BODY, color=T.COLOR_BG, bold=True)
+
+    # 填資料列
+    for r, row in enumerate(rows, start=1):
+        for c in range(n_cols):
+            cell = table.cell(r, c)
+            # 交替色底
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = T.COLOR_BG if r % 2 == 1 else RGBColor(0xF5, 0xF5, 0xF5)
+            tf = cell.text_frame
+            tf.clear()
+            tf.margin_left = Inches(0.1)
+            tf.margin_right = Inches(0.1)
+            p = tf.paragraphs[0]
+            val = row[c] if c < len(row) else ""
+            p.alignment = PP_ALIGN.CENTER if c == 0 else PP_ALIGN.LEFT
+            _add_run(p, str(val),
+                     size=T.FONT_SIZE_BODY_SMALL, color=T.COLOR_BODY)
 
 
 def render_conclusion(prs, slide_data):
@@ -396,7 +631,8 @@ def _format_citation_line(cite):
 
 # ─── main ───────────────────────────────────────────────
 
-def generate(outline: dict, output_path: str | Path) -> Path:
+def generate(outline: dict, output_path: str | Path) -> dict:
+    """產出 pptx。回傳 {output: Path, warnings: [...], slides: int}"""
     prs = Presentation()
     prs.slide_width = T.SLIDE_WIDTH
     prs.slide_height = T.SLIDE_HEIGHT
@@ -406,36 +642,66 @@ def generate(outline: dict, output_path: str | Path) -> Path:
     base_dir = outline.get("base_dir")
 
     all_citations = []
+    warnings = []
 
     for idx, s in enumerate(slides, start=1):
         layout = s.get("layout", T.LAYOUT_CONTENT)
 
-        if layout == T.LAYOUT_COVER:
-            render_cover(prs, meta)
-        elif layout == T.LAYOUT_AGENDA:
-            render_agenda(prs, meta, s.get("items", []))
-        elif layout == T.LAYOUT_CONTENT:
-            render_content(prs, s)
-            for c in s.get("citations", []):
-                all_citations.append(c)
-        elif layout == T.LAYOUT_EXHIBIT:
-            render_exhibit(prs, s, base_dir=base_dir)
-        elif layout == T.LAYOUT_CONCLUSION:
-            render_conclusion(prs, s)
-        elif layout == T.LAYOUT_APPENDIX:
-            render_appendix(prs, all_citations)
-        else:
-            # 未知 fallback
-            render_content(prs, s)
+        try:
+            if layout == T.LAYOUT_COVER:
+                render_cover(prs, meta)
+            elif layout == T.LAYOUT_AGENDA:
+                render_agenda(prs, meta, s.get("items", []))
+            elif layout == T.LAYOUT_CONTENT:
+                render_content(prs, s)
+                for c in s.get("citations", []):
+                    all_citations.append(c)
+            elif layout == T.LAYOUT_EXHIBIT:
+                render_exhibit(prs, s, base_dir=base_dir, warnings=warnings)
+            elif layout == T.LAYOUT_TIMELINE:
+                render_timeline(prs, s)
+            elif layout == "overview":
+                render_overview(prs, s)
+            elif layout == T.LAYOUT_CONCLUSION:
+                render_conclusion(prs, s)
+            elif layout == T.LAYOUT_APPENDIX:
+                render_appendix(prs, all_citations)
+            else:
+                warnings.append(f"[Slide {idx}] 未知 layout '{layout}'，fallback 為 content")
+                render_content(prs, s)
+        except Exception as e:
+            warnings.append(f"[Slide {idx}] render 失敗 layout={layout}: {e}")
+            # 產一張錯誤提示頁而非中斷
+            _render_error_slide(prs, idx, layout, e)
 
-        # 頁碼（封面通常不顯示，但 v2 封面有寫 1）
+        # 頁碼
         slide = prs.slides[idx - 1]
         _add_page_number(slide, idx)
 
     out = Path(output_path).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     prs.save(out)
-    return out.resolve()
+    return {
+        "output": out.resolve(),
+        "warnings": warnings,
+        "slides": len(prs.slides),
+    }
+
+
+def _render_error_slide(prs, idx, layout, err):
+    slide = _blank(prs)
+    _fill_bg(slide, T.COLOR_BG)
+    _add_left_strip(slide)
+    _add_title_with_sep(slide, f"⚠ Slide {idx} 渲染失敗")
+    _, tf = _textbox(
+        slide, T.CONTENT_LEFT, Inches(1.40),
+        T.CONTENT_WIDTH, Inches(4.5),
+    )
+    _add_run(tf.paragraphs[0], f"layout: {layout}",
+             size=T.FONT_SIZE_BODY, color=T.COLOR_BODY)
+    p = tf.add_paragraph()
+    _add_run(p, f"error: {err}",
+             size=T.FONT_SIZE_BODY_SMALL, color=T.COLOR_WARNING)
 
 
 if __name__ == "__main__":
@@ -446,4 +712,9 @@ if __name__ == "__main__":
     out = Path(sys.argv[2])
     outline = json.loads(json_path.read_text(encoding="utf-8"))
     result = generate(outline, out)
-    print(f"✓ 已產出：{result}")
+    print(f"✓ 已產出：{result['output']}")
+    print(f"  共 {result['slides']} 張投影片")
+    if result["warnings"]:
+        print(f"  ⚠ {len(result['warnings'])} 項警告：")
+        for w in result["warnings"]:
+            print(f"    - {w}")
